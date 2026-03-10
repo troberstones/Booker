@@ -1,0 +1,22 @@
+# Optional dependencies for LOCAL TTS (Apple Silicon / CPU).
+# Install ONE of the backends below, or both.
+#
+# These are NOT needed if you only use the default OpenAI cloud TTS.
+
+# ── Kokoro-82M (recommended for Apple M-series) ───────────────────────────────
+# StyleTTS2-based model. Downloads ~330 MB on first run.
+# Requires PyTorch with MPS support (included in standard macOS torch wheels).
+#
+kokoro>=0.9.2
+misaki[en]>=0.9.2        # G2P (grapheme-to-phoneme) for English
+soundfile>=0.12.1        # WAV I/O used internally by Kokoro
+
+# PyTorch — install the standard macOS wheel which includes MPS support:
+#   pip install torch torchvision torchaudio
+# (Do NOT install the CUDA wheel on a Mac — use the default pip wheel.)
+
+# ── Piper TTS (CPU-only fallback) ────────────────────────────────────────────
+# ONNX-based, extremely fast, no GPU required.
+# Voice ONNX files (~60–200 MB) are downloaded automatically on first use.
+#
+piper-tts>=1.2.0

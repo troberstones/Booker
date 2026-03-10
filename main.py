@@ -3,15 +3,19 @@ main.py — Orchestrate the full pipeline:
 
   1. Scrape  — download all chapters from wanderinginn.com
   2. Filter  — replace profanity with clean alternatives
-  3. Audio   — generate MP3 audiobooks via OpenAI TTS
+  3. Audio   — generate MP3 audiobooks (OpenAI cloud or local model)
 
-Run the full pipeline:
+Run the full pipeline (OpenAI TTS):
     python main.py
+
+Run with a local TTS model (no API key, no cost):
+    python main.py --local-tts kokoro    # recommended for Apple M-series
+    python main.py --local-tts piper     # lightweight CPU-only fallback
 
 Run individual stages:
     python main.py --scrape-only
     python main.py --filter-only
-    python main.py --audio-only
+    python main.py --audio-only --local-tts kokoro
 
 Additional flags:
     --no-resume     Re-download/re-generate even if output files exist
@@ -59,6 +63,17 @@ def _parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--local-tts",
+        metavar="BACKEND",
+        choices=["kokoro", "piper"],
+        default=None,
+        help=(
+            "Use a local TTS model instead of the OpenAI API (no cost, no internet). "
+            "kokoro: recommended for Apple M-series (MPS GPU, 24 kHz, high quality). "
+            "piper: lightweight CPU-only fallback (22 kHz, very fast)."
+        ),
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Do not skip already-completed files (re-download / re-generate).",
@@ -80,6 +95,7 @@ def main() -> None:
 
     resume = not args.no_resume
     run_all = not (args.scrape_only or args.filter_only or args.audio_only)
+    local_tts = args.local_tts
 
     # ── Stage 1: Scrape ────────────────────────────────────────────────────────
     if run_all or args.scrape_only:
@@ -105,10 +121,11 @@ def main() -> None:
 
     # ── Stage 3: Audiobook generation ─────────────────────────────────────────
     if run_all or args.audio_only:
-        log.info("━━━  Stage 3: Audiobook generation  ━━━")
+        engine_label = f"local:{local_tts}" if local_tts else "OpenAI"
+        log.info("━━━  Stage 3: Audiobook generation (%s)  ━━━", engine_label)
         try:
             from audiobook import generate_all_audiobooks
-            generate_all_audiobooks()
+            generate_all_audiobooks(local_tts=local_tts)
         except EnvironmentError as exc:
             log.error("%s", exc)
             sys.exit(1)

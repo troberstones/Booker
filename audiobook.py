@@ -1,17 +1,23 @@
 """
 audiobook.py — Generate MP3 audiobook files from cleaned book text.
 
-Strategy
---------
-The Wandering Inn is enormous (millions of words).  The OpenAI TTS API accepts
-at most ~4 096 tokens (~4 000 characters) per request.  We therefore:
+Two TTS engines are supported:
 
-  1. Split the book text into sentence-aware chunks of ≤ TTS_CHUNK_SIZE chars.
-  2. Send each chunk to the API and save the returned audio as a temp MP3.
-  3. Concatenate all the temp MP3s into one final file using pydub.
-  4. Clean up the temp files.
+OpenAI (cloud, default)
+-----------------------
+  - High quality, any machine, requires an API key and internet.
+  - Charged per character (~$7.50–$15 per million chars).
+  - Max 4 000 chars per API call; we split and stitch automatically.
 
-One MP3 is produced per *volume* text file found in config.BOOKS_DIR.
+Local (free, offline)
+---------------------
+  - No API key, no cost, works completely offline.
+  - Two backends:
+      kokoro  Recommended for Apple M-series. Uses Metal GPU (MPS).
+              Excellent quality, ~82M params, 24 kHz output.
+      piper   Lightweight CPU-only fallback. Very fast even without a GPU.
+              Slightly lower quality; 22 050 Hz output.
+  - Chunk size is much larger (10 000 chars) since there is no API limit.
 
 Resuming
 --------
@@ -162,35 +168,110 @@ def generate_audiobook(text_path: Path, audio_dir: Path, client: OpenAI) -> Path
     return out_path
 
 
+# ── Local TTS audiobook generation ────────────────────────────────────────────
+
+def generate_audiobook_local(
+    text_path: Path,
+    audio_dir: Path,
+    backend,  # LocalTTSBackend
+) -> Path:
+    """
+    Convert a single volume text file into an MP3 audiobook using a local
+    TTS backend (Kokoro or Piper).
+
+    Returns the path to the generated MP3.
+    """
+    import tempfile
+
+    from pydub import AudioSegment
+
+    from local_tts import write_wav
+
+    stem = text_path.stem
+    out_path = audio_dir / f"{stem}.mp3"
+
+    if out_path.exists() and out_path.stat().st_size > 0:
+        log.info("Skipping '%s' — audiobook already exists.", stem)
+        return out_path
+
+    text = text_path.read_text(encoding="utf-8").strip()
+    if not text:
+        log.warning("'%s' is empty — nothing to convert.", stem)
+        return out_path
+
+    chunks = list(_split_into_chunks(text, max_chars=config.LOCAL_TTS_CHUNK_SIZE))
+    log.info("'%s': %d chunks (local TTS) → %s", stem, len(chunks), out_path.name)
+
+    with tempfile.TemporaryDirectory(prefix="booker_local_tts_") as tmpdir:
+        tmp = Path(tmpdir)
+        wav_path = tmp / "audio.wav"
+
+        log.info("Synthesising with %s backend…", type(backend).__name__)
+        audio = backend.synthesize(chunks, progress_desc=stem)
+        write_wav(wav_path, audio, backend.sample_rate)
+
+        log.info("Converting WAV → MP3…")
+        segment = AudioSegment.from_wav(str(wav_path))
+        segment.export(str(out_path), format="mp3", bitrate="128k")
+
+    log.info(
+        "Audiobook saved → %s (%.1f MB)", out_path.name, out_path.stat().st_size / 1e6
+    )
+    return out_path
+
+
 # ── Batch generation ───────────────────────────────────────────────────────────
 
-def generate_all_audiobooks() -> None:
+def generate_all_audiobooks(local_tts: str | None = None) -> None:
     """
     Find every top-level .txt volume file in config.BOOKS_DIR and generate
     an MP3 audiobook for each one.
+
+    Args:
+        local_tts: None → use OpenAI API.
+                   "kokoro" → use Kokoro local backend.
+                   "piper"  → use Piper local backend.
     """
     books_dir = Path(config.BOOKS_DIR)
     audio_dir = Path(config.AUDIO_DIR)
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    # Top-level .txt files are the merged per-volume files created by scraper.py.
     volume_files = sorted(books_dir.glob("*.txt"))
 
     if not volume_files:
         log.warning(
-            "No .txt volume files found in %s.  "
-            "Run the scraper first.",
+            "No .txt volume files found in %s.  Run the scraper first.",
             books_dir,
         )
         return
 
     log.info("Found %d volume file(s) to convert.", len(volume_files))
-    client = _make_client()
 
-    for vol_path in volume_files:
+    if local_tts:
+        # ── Local path ────────────────────────────────────────────────────────
+        from local_tts import get_backend
+
+        log.info("Using local TTS backend: %s", local_tts)
+        backend = get_backend(local_tts)
         try:
-            generate_audiobook(vol_path, audio_dir, client)
-        except Exception as exc:
-            log.error("Failed to generate audiobook for '%s': %s", vol_path.stem, exc)
+            for vol_path in volume_files:
+                try:
+                    generate_audiobook_local(vol_path, audio_dir, backend)
+                except Exception as exc:
+                    log.error(
+                        "Failed to generate audiobook for '%s': %s", vol_path.stem, exc
+                    )
+        finally:
+            backend.close()
+    else:
+        # ── OpenAI cloud path ─────────────────────────────────────────────────
+        client = _make_client()
+        for vol_path in volume_files:
+            try:
+                generate_audiobook(vol_path, audio_dir, client)
+            except Exception as exc:
+                log.error(
+                    "Failed to generate audiobook for '%s': %s", vol_path.stem, exc
+                )
 
     log.info("All audiobooks complete.  Files are in: %s", audio_dir)
