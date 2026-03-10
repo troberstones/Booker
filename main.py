@@ -1,0 +1,124 @@
+"""
+main.py — Orchestrate the full pipeline:
+
+  1. Scrape  — download all chapters from wanderinginn.com
+  2. Filter  — replace profanity with clean alternatives
+  3. Audio   — generate MP3 audiobooks via OpenAI TTS
+
+Run the full pipeline:
+    python main.py
+
+Run individual stages:
+    python main.py --scrape-only
+    python main.py --filter-only
+    python main.py --audio-only
+
+Additional flags:
+    --no-resume     Re-download/re-generate even if output files exist
+    --log-level     DEBUG | INFO | WARNING  (default: INFO)
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+
+
+def _configure_logging(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Wandering Inn → cleaned text → MP3 audiobook pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    stage = parser.add_mutually_exclusive_group()
+    stage.add_argument(
+        "--scrape-only",
+        action="store_true",
+        help="Only run the web scraper stage.",
+    )
+    stage.add_argument(
+        "--filter-only",
+        action="store_true",
+        help="Only run the profanity-filter stage.",
+    )
+    stage.add_argument(
+        "--audio-only",
+        action="store_true",
+        help="Only run the audiobook-generation stage.",
+    )
+
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Do not skip already-completed files (re-download / re-generate).",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity (default: INFO).",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    _configure_logging(args.log_level)
+    log = logging.getLogger("main")
+
+    resume = not args.no_resume
+    run_all = not (args.scrape_only or args.filter_only or args.audio_only)
+
+    # ── Stage 1: Scrape ────────────────────────────────────────────────────────
+    if run_all or args.scrape_only:
+        log.info("━━━  Stage 1: Scraping  ━━━")
+        try:
+            from scraper import scrape_all
+            scrape_all(resume=resume)
+        except Exception as exc:
+            log.error("Scraping failed: %s", exc, exc_info=True)
+            if args.scrape_only:
+                sys.exit(1)
+
+    # ── Stage 2: Filter ────────────────────────────────────────────────────────
+    if run_all or args.filter_only:
+        log.info("━━━  Stage 2: Profanity filtering  ━━━")
+        try:
+            from filter import clean_books_dir
+            clean_books_dir()
+        except Exception as exc:
+            log.error("Filtering failed: %s", exc, exc_info=True)
+            if args.filter_only:
+                sys.exit(1)
+
+    # ── Stage 3: Audiobook generation ─────────────────────────────────────────
+    if run_all or args.audio_only:
+        log.info("━━━  Stage 3: Audiobook generation  ━━━")
+        try:
+            from audiobook import generate_all_audiobooks
+            generate_all_audiobooks()
+        except EnvironmentError as exc:
+            log.error("%s", exc)
+            sys.exit(1)
+        except Exception as exc:
+            log.error("Audiobook generation failed: %s", exc, exc_info=True)
+            if args.audio_only:
+                sys.exit(1)
+
+    log.info("Done.")
+
+
+if __name__ == "__main__":
+    main()
