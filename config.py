@@ -21,6 +21,20 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
+# ── Human-mode scraping ───────────────────────────────────────────────────────
+# Activated with --human-mode.  Makes requests indistinguishable from a real
+# reader clicking through chapters in a browser.
+#
+# Delay buckets: (min_seconds, max_seconds, weight_percent)
+# Weights must sum to 100.  Tweak to taste — the defaults model a reader who
+# moves quickly most of the time but occasionally pauses or takes a break.
+HUMAN_DELAY_BUCKETS = [
+    (10,   25,  50),   # quick: just finished, clicked straight away
+    (45,  120,  30),   # normal: read the chapter at a comfortable pace
+    (180, 480,  15),   # slow/distracted: got drawn into something else
+    (900, 2700,  5),   # break: made coffee / stepped away from the screen
+]
+
 # ── Output paths ──────────────────────────────────────────────────────────────
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 BOOKS_DIR = os.path.join(OUTPUT_DIR, "books")

@@ -70,6 +70,15 @@ def _parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--human-mode",
+        action="store_true",
+        help=(
+            "Make the scraper appear as a real browser: rotates Chrome/Firefox/Safari "
+            "profiles with matching headers, sends a Referer chain between pages, and "
+            "uses human-paced delays (10s–45min). Slower but much harder to detect."
+        ),
+    )
+    parser.add_argument(
         "--volumes",
         metavar="SELECTION",
         default=None,
@@ -114,13 +123,14 @@ def main() -> None:
     run_all = not (args.scrape_only or args.filter_only or args.audio_only)
     local_tts = args.local_tts
     volumes_preset = args.volumes
+    human_mode = args.human_mode
 
     # ── Stage 1: Scrape ────────────────────────────────────────────────────────
     if run_all or args.scrape_only:
         log.info("━━━  Stage 1: Scraping  ━━━")
         try:
             from scraper import scrape_all
-            scrape_all(resume=resume, volumes_preset=volumes_preset)
+            scrape_all(resume=resume, volumes_preset=volumes_preset, human_mode=human_mode)
         except Exception as exc:
             log.error("Scraping failed: %s", exc, exc_info=True)
             if args.scrape_only:

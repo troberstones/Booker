@@ -50,20 +50,155 @@ class Volume:
     chapters: List[Chapter] = field(default_factory=list)
 
 
+# ── Browser profiles (human mode) ─────────────────────────────────────────────
+#
+# Each profile is a dict of HTTP headers that exactly matches what the named
+# real browser sends on a navigation request.  Safari omits Sec-Fetch-* and
+# Sec-CH-UA-* entirely; Chrome and Firefox send different subsets.
+
+_BROWSER_PROFILES: list[dict[str, str]] = [
+    # ── Chrome 124 on macOS ────────────────────────────────────────────────────
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "image/avif,image/webp,image/apng,*/*;q=0.8,"
+                  "application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"macOS"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+    },
+    # ── Chrome 124 on Windows 11 ───────────────────────────────────────────────
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "image/avif,image/webp,image/apng,*/*;q=0.8,"
+                  "application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+    },
+    # ── Firefox 125 on macOS ───────────────────────────────────────────────────
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) "
+            "Gecko/20100101 Firefox/125.0"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+                  "image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+        "TE": "trailers",
+    },
+    # ── Firefox 125 on Windows ────────────────────────────────────────────────
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
+            "Gecko/20100101 Firefox/125.0"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+                  "image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+        "TE": "trailers",
+    },
+    # ── Safari 17 on macOS ────────────────────────────────────────────────────
+    # Safari deliberately omits Sec-Fetch-* and Sec-CH-UA-* headers.
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/17.4.1 Safari/605.1.15"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    },
+]
+
+
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
-def _make_session() -> requests.Session:
+def _make_session(human_mode: bool = False) -> requests.Session:
     session = requests.Session()
-    session.headers.update(config.HEADERS)
+    if human_mode:
+        # Pick a random profile for this session and stick with it — a real
+        # user doesn't switch browsers mid-session.
+        profile = random.choice(_BROWSER_PROFILES)
+        session.headers.update(profile)
+        log.info(
+            "Human mode: using profile '%s'",
+            _profile_name(profile["User-Agent"]),
+        )
+    else:
+        session.headers.update(config.HEADERS)
     return session
 
 
-def _get(session: requests.Session, url: str, retries: int = 4) -> requests.Response:
-    """GET with exponential back-off on transient errors."""
+def _profile_name(ua: str) -> str:
+    """Return a short human-readable label for a User-Agent string."""
+    if "Firefox" in ua:
+        browser = "Firefox"
+    elif "Safari" in ua and "Chrome" not in ua:
+        browser = "Safari"
+    else:
+        browser = "Chrome"
+    platform = "macOS" if "Macintosh" in ua or "Mac OS X" in ua else "Windows"
+    return f"{browser}/{platform}"
+
+
+def _get(
+    session: requests.Session,
+    url: str,
+    retries: int = 4,
+    referer: Optional[str] = None,
+) -> requests.Response:
+    """GET with exponential back-off on transient errors.
+
+    If *referer* is supplied it is sent as the Referer header for this request
+    only, simulating a user navigating from the previous page.
+    """
+    headers = {"Referer": referer} if referer else {}
     delay = 2
     for attempt in range(retries):
         try:
-            resp = session.get(url, timeout=30)
+            resp = session.get(url, timeout=30, headers=headers)
             resp.raise_for_status()
             return resp
         except requests.RequestException as exc:
@@ -72,7 +207,6 @@ def _get(session: requests.Session, url: str, retries: int = 4) -> requests.Resp
             log.warning("Request failed (%s); retrying in %ds…", exc, delay)
             time.sleep(delay)
             delay *= 2
-    # unreachable, but satisfies type checkers
     raise RuntimeError("unreachable")
 
 
@@ -80,6 +214,31 @@ def _polite_sleep() -> None:
     """Sleep a random amount between configured min/max to avoid hammering."""
     duration = random.uniform(config.SCRAPE_DELAY_MIN, config.SCRAPE_DELAY_MAX)
     log.debug("Sleeping %.1fs…", duration)
+    time.sleep(duration)
+
+
+def _human_sleep() -> None:
+    """
+    Sleep for a duration drawn from a weighted bucket distribution that
+    mimics realistic inter-chapter pauses for a human reader.
+
+    Buckets and weights are defined in config.HUMAN_DELAY_BUCKETS.
+    """
+    buckets = config.HUMAN_DELAY_BUCKETS
+    weights = [b[2] for b in buckets]
+    lo, hi, _ = random.choices(buckets, weights=weights, k=1)[0]
+    duration = random.uniform(lo, hi)
+
+    if duration < 60:
+        label = f"{duration:.0f}s"
+    elif duration < 3600:
+        label = f"{duration / 60:.1f}min"
+    else:
+        label = f"{duration / 3600:.1f}h"
+
+    bucket_names = ["quick", "normal", "slow", "break"]
+    bucket_idx = buckets.index((lo, hi, _))
+    log.info("  [human] %s pause: %s", bucket_names[bucket_idx], label)
     time.sleep(duration)
 
 
@@ -96,7 +255,7 @@ def fetch_toc(session: requests.Session) -> List[Volume]:
     before the next heading.
     """
     log.info("Fetching table of contents from %s", config.TOC_URL)
-    resp = _get(session, config.TOC_URL)
+    resp = _get(session, config.TOC_URL, referer="https://wanderinginn.com/")
     soup = BeautifulSoup(resp.text, "lxml")
 
     # The ToC content lives inside the main article / entry-content div.
@@ -362,6 +521,7 @@ def _parse_selection(
 def scrape_all(
     resume: bool = True,
     volumes_preset: Optional[str] = None,
+    human_mode: bool = False,
 ) -> None:
     """
     Scrape selected volumes and write plain-text files under output/books/.
@@ -373,9 +533,17 @@ def scrape_all(
                         *preset* argument.  If None and stdin is a TTY, the
                         interactive menu is shown.  If None and stdin is not a
                         TTY, defaults to "new" (only not-yet-started volumes).
+        human_mode:     If True, rotate browser profiles, send realistic
+                        Referer chains, and use human-paced delays between
+                        chapter downloads.
     """
+    if human_mode:
+        log.info(
+            "Human mode enabled — rotating browser profiles, realistic delays. "
+            "This will be slow by design."
+        )
     os.makedirs(config.BOOKS_DIR, exist_ok=True)
-    session = _make_session()
+    session = _make_session(human_mode=human_mode)
     volumes = fetch_toc(session)
 
     # Determine which volumes to scrape.
@@ -415,11 +583,15 @@ def scrape_all(
             len(volume.chapters),
         )
 
+        # Track the previous URL so each request carries a realistic Referer.
+        referer: Optional[str] = config.TOC_URL
+
         for ch_index, chapter in enumerate(volume.chapters, start=1):
             ch_filename = vol_dir / f"{ch_index:04d}_{_safe_filename(chapter.title)}.txt"
 
             if resume and ch_filename.exists() and ch_filename.stat().st_size > 0:
                 log.info("  [skip] %s (already downloaded)", chapter.title)
+                referer = chapter.url  # keep the chain intact even when skipping
                 continue
 
             log.info(
@@ -430,7 +602,7 @@ def scrape_all(
             )
 
             try:
-                resp = _get(session, chapter.url)
+                resp = _get(session, chapter.url, referer=referer)
                 text = _extract_chapter_text(resp.text, chapter.title)
             except Exception as exc:
                 log.error("  Failed to fetch '%s': %s", chapter.title, exc)
@@ -446,7 +618,13 @@ def scrape_all(
                 )
                 log.info("  Saved %d chars → %s", len(text), ch_filename.name)
 
-            _polite_sleep()
+            # Advance the referer to this chapter for the next request.
+            referer = chapter.url
+
+            if human_mode:
+                _human_sleep()
+            else:
+                _polite_sleep()
 
         # Concatenate all chapters into one volume text file.
         _merge_volume(vol_dir, safe_vol_title)
