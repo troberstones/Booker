@@ -17,6 +17,13 @@ Run individual stages:
     python main.py --filter-only
     python main.py --audio-only --local-tts kokoro
 
+Skip the interactive menu and scrape specific volumes:
+    python main.py --volumes all          # every volume
+    python main.py --volumes new          # only not-yet-started volumes
+    python main.py --volumes 1,3,5        # specific volumes by number
+    python main.py --volumes 2-4          # a range of volumes
+    python main.py --volumes 1,3-5,7      # mixed
+
 Additional flags:
     --no-resume     Re-download/re-generate even if output files exist
     --log-level     DEBUG | INFO | WARNING  (default: INFO)
@@ -63,6 +70,16 @@ def _parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--volumes",
+        metavar="SELECTION",
+        default=None,
+        help=(
+            "Which volumes to scrape, skipping the interactive menu. "
+            "all=every volume, new=not yet started, "
+            "or a number/range/list e.g. 1  1,3,5  2-4  1,3-5,7"
+        ),
+    )
+    parser.add_argument(
         "--local-tts",
         metavar="BACKEND",
         choices=["kokoro", "piper"],
@@ -96,13 +113,14 @@ def main() -> None:
     resume = not args.no_resume
     run_all = not (args.scrape_only or args.filter_only or args.audio_only)
     local_tts = args.local_tts
+    volumes_preset = args.volumes
 
     # ── Stage 1: Scrape ────────────────────────────────────────────────────────
     if run_all or args.scrape_only:
         log.info("━━━  Stage 1: Scraping  ━━━")
         try:
             from scraper import scrape_all
-            scrape_all(resume=resume)
+            scrape_all(resume=resume, volumes_preset=volumes_preset)
         except Exception as exc:
             log.error("Scraping failed: %s", exc, exc_info=True)
             if args.scrape_only:

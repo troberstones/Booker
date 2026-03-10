@@ -3,10 +3,11 @@ scraper.py — Slowly and politely scrape The Wandering Inn chapters.
 
 Flow:
   1. Fetch the Table of Contents page.
-  2. Parse it into a list of volumes, each containing (title, url) chapter pairs.
-  3. For each chapter, fetch the page, extract the chapter body text, and
-     accumulate it into the volume's text file.
-  4. Honour a random delay between every request so the server isn't hammered.
+  2. Show an interactive volume-selection menu (skipped when stdin is not a TTY).
+  3. For each selected volume, fetch every chapter page, extract the prose text,
+     and write it to a per-chapter .txt file.
+  4. Merge per-chapter files into one .txt file per volume.
+  5. Honour a random delay between every request so the server isn't hammered.
 """
 
 from __future__ import annotations
@@ -14,10 +15,12 @@ from __future__ import annotations
 import logging
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -28,6 +31,12 @@ log = logging.getLogger(__name__)
 
 
 # ── Data structures ────────────────────────────────────────────────────────────
+
+class DownloadStatus(Enum):
+    NOT_STARTED = "not started"
+    PARTIAL     = "partial"
+    COMPLETE    = "complete"
+
 
 @dataclass
 class Chapter:
@@ -172,20 +181,224 @@ def _extract_chapter_text(html: str, chapter_title: str) -> str:
     return "\n\n".join(paragraphs)
 
 
+# ── Volume status ──────────────────────────────────────────────────────────────
+
+def _volume_status(volume: Volume, vol_index: int) -> tuple[DownloadStatus, int, int]:
+    """
+    Return (status, chapters_downloaded, total_chapters) for a volume.
+
+    A volume is COMPLETE  if its merged .txt file exists and is non-empty.
+    A volume is PARTIAL   if some per-chapter files exist but the merged file
+                          is absent or empty.
+    A volume is NOT_STARTED if no files have been saved yet.
+    """
+    total = len(volume.chapters)
+    safe_title = _safe_filename(f"{vol_index:02d}_{volume.title}")
+    merged_path = Path(config.BOOKS_DIR) / f"{safe_title}.txt"
+    vol_dir = Path(config.BOOKS_DIR) / safe_title
+
+    if merged_path.exists() and merged_path.stat().st_size > 0:
+        return DownloadStatus.COMPLETE, total, total
+
+    if vol_dir.exists():
+        done = len(list(vol_dir.glob("*.txt")))
+        if done > 0:
+            return DownloadStatus.PARTIAL, done, total
+
+    return DownloadStatus.NOT_STARTED, 0, total
+
+
+# ── Interactive volume selection ───────────────────────────────────────────────
+
+_STATUS_ICON = {
+    DownloadStatus.COMPLETE:    "✓",
+    DownloadStatus.PARTIAL:     "~",
+    DownloadStatus.NOT_STARTED: "○",
+}
+
+
+def prompt_volume_selection(
+    volumes: List[Volume],
+    preset: Optional[str] = None,
+) -> List[int]:
+    """
+    Ask the user which volumes to download and return a list of 0-based indices.
+
+    Args:
+        volumes: Full list of volumes parsed from the ToC.
+        preset:  If given, skip the interactive prompt and interpret this string
+                 directly ("all", "new", or comma/range notation like "1,3,5-7").
+                 Useful for scripted / non-TTY invocations.
+
+    Returns:
+        Sorted list of 0-based volume indices to scrape.
+    """
+    os.makedirs(config.BOOKS_DIR, exist_ok=True)
+
+    # Gather status for every volume up front.
+    statuses = [_volume_status(v, i + 1) for i, v in enumerate(volumes)]
+
+    # ── Non-interactive shortcut ───────────────────────────────────────────────
+    if preset is not None:
+        return _parse_selection(preset, volumes, statuses)
+
+    # ── Interactive prompt ─────────────────────────────────────────────────────
+    print()
+    print("  Available volumes")
+    print("  " + "─" * 60)
+
+    for i, (volume, (status, done, total)) in enumerate(zip(volumes, statuses), start=1):
+        icon = _STATUS_ICON[status]
+        label = status.value
+        if status is DownloadStatus.PARTIAL:
+            label = f"partial ({done}/{total} chapters)"
+        elif status is DownloadStatus.COMPLETE:
+            label = f"complete ({total} chapters)"
+        else:
+            label = f"not started ({total} chapters)"
+
+        print(f"  [{i:>2}]  {icon}  {volume.title:<45}  {label}")
+
+    print()
+    print("  Enter your selection:")
+    print("    A number or comma-separated list   e.g.  1  or  1,3,5")
+    print("    A range                            e.g.  2-4  or  1,3-5,7")
+    print("    all   — download every volume")
+    print("    new   — download only volumes not yet started")
+    print()
+
+    while True:
+        try:
+            raw = input("  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            sys.exit(0)
+
+        if not raw:
+            continue
+
+        try:
+            indices = _parse_selection(raw, volumes, statuses)
+        except ValueError as exc:
+            print(f"  Invalid input: {exc}  — please try again.")
+            continue
+
+        if not indices:
+            print("  No volumes matched that selection — please try again.")
+            continue
+
+        # Confirm what was selected.
+        print()
+        print(f"  Selected {len(indices)} volume(s):")
+        for idx in indices:
+            print(f"    • {volumes[idx].title}")
+        print()
+        return indices
+
+
+def _parse_selection(
+    raw: str,
+    volumes: List[Volume],
+    statuses: list,
+) -> List[int]:
+    """
+    Parse a selection string into a sorted list of 0-based volume indices.
+
+    Accepted formats
+    ----------------
+    all         every volume
+    new         volumes with NOT_STARTED status
+    1           single volume (1-based)
+    1,3,5       multiple volumes
+    2-4         inclusive range
+    1,3-5,7     mixed
+    """
+    raw = raw.strip().lower()
+
+    if raw == "all":
+        return list(range(len(volumes)))
+
+    if raw == "new":
+        return [i for i, (status, _, _) in enumerate(statuses)
+                if status is DownloadStatus.NOT_STARTED]
+
+    indices: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            parts = token.split("-", 1)
+            try:
+                lo, hi = int(parts[0]), int(parts[1])
+            except ValueError:
+                raise ValueError(f"'{token}' is not a valid range")
+            if lo < 1 or hi > len(volumes) or lo > hi:
+                raise ValueError(
+                    f"range {lo}-{hi} is out of bounds (1–{len(volumes)})"
+                )
+            indices.extend(range(lo - 1, hi))
+        else:
+            try:
+                n = int(token)
+            except ValueError:
+                raise ValueError(f"'{token}' is not a number")
+            if n < 1 or n > len(volumes):
+                raise ValueError(f"{n} is out of bounds (1–{len(volumes)})")
+            indices.append(n - 1)
+
+    # Deduplicate while preserving order.
+    seen: set[int] = set()
+    result: list[int] = []
+    for idx in indices:
+        if idx not in seen:
+            seen.add(idx)
+            result.append(idx)
+    return sorted(result)
+
+
 # ── Main scrape routine ────────────────────────────────────────────────────────
 
-def scrape_all(resume: bool = True) -> None:
+def scrape_all(
+    resume: bool = True,
+    volumes_preset: Optional[str] = None,
+) -> None:
     """
-    Scrape every volume/chapter and write plain-text files under output/books/.
+    Scrape selected volumes and write plain-text files under output/books/.
 
-    If *resume* is True (the default), already-completed chapter files are
-    skipped so a crashed run can be restarted without re-downloading.
+    Args:
+        resume:         If True (default), already-downloaded chapter files are
+                        skipped so a crashed run can be restarted safely.
+        volumes_preset: Passed directly to prompt_volume_selection as the
+                        *preset* argument.  If None and stdin is a TTY, the
+                        interactive menu is shown.  If None and stdin is not a
+                        TTY, defaults to "new" (only not-yet-started volumes).
     """
     os.makedirs(config.BOOKS_DIR, exist_ok=True)
     session = _make_session()
     volumes = fetch_toc(session)
 
-    for vol_index, volume in enumerate(volumes, start=1):
+    # Determine which volumes to scrape.
+    if volumes_preset is None and not sys.stdin.isatty():
+        # Non-interactive environment (piped, cron, etc.) — default to "new".
+        log.info("Non-interactive mode: defaulting to 'new' (undownloaded volumes).")
+        volumes_preset = "new"
+
+    selected_indices = prompt_volume_selection(volumes, preset=volumes_preset)
+
+    if not selected_indices:
+        log.info("No volumes selected — nothing to do.")
+        return
+
+    log.info(
+        "Scraping %d volume(s): %s",
+        len(selected_indices),
+        ", ".join(volumes[i].title for i in selected_indices),
+    )
+
+    for vol_index, volume in (
+        (i + 1, volumes[i]) for i in selected_indices
+    ):
         if not volume.chapters:
             log.info("Skipping empty volume: %s", volume.title)
             continue
