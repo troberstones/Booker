@@ -4,3 +4,4 @@ lxml>=4.9.0
 openai>=1.30.0
 pydub>=0.25.1
 tqdm>=4.66.0
+ebooklib>=0.18
