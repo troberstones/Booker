@@ -70,6 +70,16 @@ class LocalTTSBackend(ABC):
             if arr.size > 0:
                 yield arr
 
+    def synthesize_segment(self, text: str, voice: str) -> np.ndarray:
+        """
+        Synthesise a single text segment using the specified voice.
+        Returns a float32 numpy array normalised to [-1, 1].
+
+        The base implementation calls synthesize() with the default voice;
+        backends that support per-call voice selection should override this.
+        """
+        return self.synthesize([text])
+
     def close(self) -> None:
         """Release any resources held by the backend (optional)."""
 
@@ -180,6 +190,22 @@ class KokoroBackend(LocalTTSBackend):
             except Exception as exc:
                 log.error("Kokoro synthesis error: %s", exc)
                 raise
+
+    def synthesize_segment(self, text: str, voice: str) -> np.ndarray:
+        """Synthesise text using a specific Kokoro voice (for multi-voice)."""
+        if not text.strip():
+            return np.array([], dtype=np.float32)
+        try:
+            parts = []
+            for _, _, audio in self._pipeline(text, voice=voice, speed=self._speed):
+                if audio is not None and len(audio) > 0:
+                    parts.append(audio if isinstance(audio, np.ndarray) else np.array(audio))
+            if parts:
+                return np.concatenate(parts).astype(np.float32)
+        except Exception as exc:
+            log.error("Kokoro synthesis error (voice=%s): %s", voice, exc)
+            raise
+        return np.array([], dtype=np.float32)
 
 
 # ── Piper backend ──────────────────────────────────────────────────────────────

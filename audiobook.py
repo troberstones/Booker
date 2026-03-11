@@ -330,6 +330,8 @@ def generate_audiobook_local(
     text_path: Path,
     audio_dir: Path,
     backend,  # LocalTTSBackend
+    mv_registry=None,   # speaker_analysis.CharacterRegistry | None
+    mv_voice_map=None,  # speaker_analysis.VoiceMap | None
 ) -> Path:
     """
     Convert a single volume text file into an M4B audiobook using a local
@@ -376,22 +378,39 @@ def generate_audiobook_local(
                 chapter_seg += AudioSegment.silent(duration=config.AUDIO_CHAPTER_SILENCE_MS)
 
             if content:
-                paragraphs = list(_iter_paragraphs(content))
-                texts = [t for t, _ in paragraphs if t]
-                pauses = [p for _, p in paragraphs]
-                audio_iter = backend.synthesize_iter(
-                    texts, progress_desc=f"ch{ch_idx+1}/{len(chapter_files)}"
-                )
-                audio_queue = list(audio_iter)
-                audio_idx = 0
-                for para_text, pause_ms in paragraphs:
-                    if para_text:
-                        if audio_idx < len(audio_queue):
-                            wav_path = tmp / f"ch{ch_idx:04d}_para_{audio_idx:06d}.wav"
-                            write_wav(wav_path, audio_queue[audio_idx], backend.sample_rate)
-                            chapter_seg += AudioSegment.from_wav(str(wav_path))
-                            audio_idx += 1
-                    chapter_seg += AudioSegment.silent(duration=pause_ms)
+                if config.MULTI_VOICE and mv_registry is not None and mv_voice_map is not None:
+                    # ── Multi-voice path ─────────────────────────────────────
+                    from speaker_analysis import analyse_chapter
+                    from local_tts import write_wav as _write_wav
+                    segments = analyse_chapter(content, mv_registry)
+                    for seg_idx, seg in enumerate(
+                        tqdm(segments, desc=f"ch{ch_idx+1}/{len(chapter_files)}", unit="seg")
+                    ):
+                        if seg.text:
+                            voice = mv_voice_map.get_voice(seg.speaker, seg.gender)
+                            audio_arr = backend.synthesize_segment(seg.text, voice)
+                            if audio_arr.size > 0:
+                                wav_path = tmp / f"ch{ch_idx:04d}_seg_{seg_idx:06d}.wav"
+                                _write_wav(wav_path, audio_arr, backend.sample_rate)
+                                chapter_seg += AudioSegment.from_wav(str(wav_path))
+                        chapter_seg += AudioSegment.silent(duration=seg.pause_ms)
+                else:
+                    # ── Single-voice path ─────────────────────────────────────
+                    paragraphs = list(_iter_paragraphs(content))
+                    texts = [t for t, _ in paragraphs if t]
+                    audio_iter = backend.synthesize_iter(
+                        texts, progress_desc=f"ch{ch_idx+1}/{len(chapter_files)}"
+                    )
+                    audio_queue = list(audio_iter)
+                    audio_idx = 0
+                    for para_text, pause_ms in paragraphs:
+                        if para_text:
+                            if audio_idx < len(audio_queue):
+                                wav_path = tmp / f"ch{ch_idx:04d}_para_{audio_idx:06d}.wav"
+                                write_wav(wav_path, audio_queue[audio_idx], backend.sample_rate)
+                                chapter_seg += AudioSegment.from_wav(str(wav_path))
+                                audio_idx += 1
+                        chapter_seg += AudioSegment.silent(duration=pause_ms)
 
             ch_mp3 = tmp / f"chapter_{ch_idx:04d}.mp3"
             chapter_seg.export(str(ch_mp3), format="mp3", bitrate="128k")
@@ -441,10 +460,23 @@ def generate_all_audiobooks(local_tts: str | None = None) -> None:
         from local_tts import get_backend
         log.info("Using local TTS backend: %s", local_tts)
         backend = get_backend(local_tts)
+
+        mv_registry = None
+        mv_voice_map = None
+        if config.MULTI_VOICE:
+            from speaker_analysis import CharacterRegistry, VoiceMap
+            mv_registry = CharacterRegistry()
+            mv_voice_map = VoiceMap()
+            log.info("Multi-voice mode enabled.")
+
         try:
             for vol_path in pending:
                 try:
-                    generate_audiobook_local(vol_path, audio_dir, backend)
+                    generate_audiobook_local(
+                        vol_path, audio_dir, backend,
+                        mv_registry=mv_registry,
+                        mv_voice_map=mv_voice_map,
+                    )
                 except Exception as exc:
                     log.error("Failed to generate audiobook for '%s': %s", vol_path.stem, exc)
         finally:

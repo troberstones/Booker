@@ -122,6 +122,15 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--multi-voice",
+        action="store_true",
+        help=(
+            "Analyse dialog attribution and use a different voice per speaker gender "
+            "(narrator, female characters, male characters). "
+            "Requires --local-tts kokoro."
+        ),
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Do not skip already-completed files (re-download / re-generate).",
@@ -156,6 +165,13 @@ def main() -> None:
     volumes_preset = args.volumes
     human_mode = args.human_mode
     run_all = not (args.scrape_only or args.filter_only or args.audio_only)
+
+    if args.multi_voice:
+        if not local_tts:
+            log.error("--multi-voice requires --local-tts kokoro.")
+            sys.exit(1)
+        import config as _config
+        _config.MULTI_VOICE = True
 
     # ── Stage 0: EPUB import ───────────────────────────────────────────────────
     # Skip if --filter-only or --audio-only: those mean re-run that stage on

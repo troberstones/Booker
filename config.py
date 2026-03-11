@@ -96,3 +96,18 @@ LOCAL_TTS_PIPER_MODEL_DIR = os.path.join(OUTPUT_DIR, "piper_models")
 # Local models have no API limit, so we use larger chunks for fewer model
 # invocations while still staying memory-efficient.
 LOCAL_TTS_CHUNK_SIZE = 10_000
+
+# ── Multi-voice synthesis ─────────────────────────────────────────────────────
+# Enabled with --multi-voice (requires --local-tts kokoro).
+# Analyses dialog attribution and uses different voices per speaker gender.
+
+# Master switch; set to True by --multi-voice flag at runtime.
+MULTI_VOICE = False
+
+# Kokoro voice pools used for character voices (narrator uses LOCAL_TTS_KOKORO_VOICE).
+FEMALE_CHARACTER_VOICES = ["af_bella", "af_nicole", "af_sarah", "af_sky"]
+MALE_CHARACTER_VOICES = ["am_adam", "am_michael"]
+
+# Extra silence (ms) inserted between a dialog line and the next segment so
+# voice changes sound natural rather than abrupt.
+DIALOG_PAUSE_MS = 150
