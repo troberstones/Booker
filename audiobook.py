@@ -427,16 +427,26 @@ def generate_audiobook_local(
 
 # ── Batch generation ───────────────────────────────────────────────────────────
 
-def generate_all_audiobooks(local_tts: str | None = None) -> None:
+def generate_all_audiobooks(
+    local_tts: str | None = None,
+    target_path: Path | None = None,
+) -> None:
     """
-    Find every top-level .txt volume file in config.BOOKS_DIR and generate
-    an M4B audiobook for each one.
+    Generate M4B audiobooks for volumes in config.BOOKS_DIR.
+
+    If *target_path* is given, only that one volume is processed (used when
+    a single EPUB was imported so we don't re-convert unrelated books).
+    Otherwise every top-level .txt file in BOOKS_DIR is processed.
     """
     books_dir = Path(config.BOOKS_DIR)
     audio_dir = Path(config.AUDIO_DIR)
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    volume_files = sorted(books_dir.glob("*.txt"))
+    if target_path is not None:
+        volume_files = [target_path] if target_path.exists() else []
+    else:
+        volume_files = sorted(books_dir.glob("*.txt"))
+
     if not volume_files:
         log.warning("No .txt volume files found in %s. Run the scraper first.", books_dir)
         return

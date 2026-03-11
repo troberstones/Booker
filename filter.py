@@ -191,6 +191,23 @@ def clean_file(input_path: Path, output_path: Path | None = None) -> Path:
     return dest
 
 
+def clean_volume(merged_path: Path) -> None:
+    """
+    Clean a single volume: the merged .txt file and all per-chapter .txt files
+    in its sibling directory (merged_path.parent / merged_path.stem/).
+    """
+    books_dir = merged_path.parent
+    chapter_dir = books_dir / merged_path.stem
+    txt_files = [merged_path] if merged_path.exists() else []
+    if chapter_dir.is_dir():
+        txt_files += sorted(chapter_dir.glob("*.txt"))
+    print(f"Cleaning {len(txt_files)} text file(s) for '{merged_path.stem}'…")
+    for path in txt_files:
+        clean_file(path)
+        print(f"  Cleaned: {path.relative_to(books_dir)}")
+    print("Filtering complete.")
+
+
 def clean_books_dir() -> None:
     """Clean every .txt file found under config.BOOKS_DIR in-place."""
     books_dir = Path(config.BOOKS_DIR)

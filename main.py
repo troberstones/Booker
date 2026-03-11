@@ -173,6 +173,22 @@ def main() -> None:
         import config as _config
         _config.MULTI_VOICE = True
 
+    # epub_merged_path is set by Stage 0 and used to scope Stages 2 and 3
+    # so that only the imported book is filtered/converted, not everything
+    # already in output/.
+    epub_merged_path: "Path | None" = None
+
+    # When --filter-only or --audio-only is combined with --epub, the EPUB was
+    # already imported in a previous run.  Reconstruct the merged path from the
+    # EPUB metadata without re-parsing the file.
+    if epub_path is not None and (args.filter_only or args.audio_only):
+        from epub_reader import _volume_title_from_epub, _safe_filename
+        from ebooklib import epub as _epub
+        import config as _config
+        _book = _epub.read_epub(str(epub_path))
+        _safe = _safe_filename(_volume_title_from_epub(_book))
+        epub_merged_path = Path(_config.BOOKS_DIR) / f"{_safe}.txt"
+
     # ── Stage 0: EPUB import ───────────────────────────────────────────────────
     # Skip if --filter-only or --audio-only: those mean re-run that stage on
     # an already-imported EPUB, so we don't re-parse the file.
@@ -180,8 +196,8 @@ def main() -> None:
         log.info("━━━  Stage 0: EPUB import  ━━━")
         try:
             from epub_reader import read_epub
-            merged_path = read_epub(epub_path)
-            log.info("EPUB imported → %s", merged_path)
+            epub_merged_path = read_epub(epub_path)
+            log.info("EPUB imported → %s", epub_merged_path)
         except Exception as exc:
             log.error("EPUB import failed: %s", exc, exc_info=True)
             sys.exit(1)
@@ -201,8 +217,13 @@ def main() -> None:
     if run_all or args.filter_only:
         log.info("━━━  Stage 2: Profanity filtering  ━━━")
         try:
-            from filter import clean_books_dir
-            clean_books_dir()
+            if epub_merged_path is not None:
+                # Only filter the one imported book
+                from filter import clean_volume
+                clean_volume(epub_merged_path)
+            else:
+                from filter import clean_books_dir
+                clean_books_dir()
         except Exception as exc:
             log.error("Filtering failed: %s", exc, exc_info=True)
             if args.filter_only:
@@ -214,7 +235,8 @@ def main() -> None:
         log.info("━━━  Stage 3: Audiobook generation (%s)  ━━━", engine_label)
         try:
             from audiobook import generate_all_audiobooks
-            generate_all_audiobooks(local_tts=local_tts)
+            # When epub mode: only convert the one imported book
+            generate_all_audiobooks(local_tts=local_tts, target_path=epub_merged_path)
         except EnvironmentError as exc:
             log.error("%s", exc)
             sys.exit(1)
