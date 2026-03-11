@@ -1,5 +1,5 @@
 """
-audiobook.py — Generate MP3 audiobook files from cleaned book text.
+audiobook.py — Generate M4B audiobook files with embedded chapter markers.
 
 Two TTS engines are supported:
 
@@ -21,19 +21,19 @@ Local (free, offline)
 
 Resuming
 --------
-If the final MP3 for a volume already exists it is skipped, so an interrupted
+If the final M4B for a volume already exists it is skipped, so an interrupted
 run can be continued safely.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import re
+import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Generator, List
+from typing import Generator, List, Tuple
 
 from openai import OpenAI
 from pydub import AudioSegment
@@ -46,17 +46,11 @@ log = logging.getLogger(__name__)
 
 # ── Text splitting ─────────────────────────────────────────────────────────────
 
-# We split on sentence boundaries so the TTS engine never receives a
-# mid-sentence cut, which would produce an awkward pause in the recording.
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
-
-
 def _split_into_chunks(text: str, max_chars: int = config.TTS_CHUNK_SIZE) -> Generator[str, None, None]:
     """
     Yield text chunks of at most *max_chars* characters, splitting only on
     sentence / paragraph boundaries so audio stitching sounds natural.
     """
-    # Split on sentence-ending punctuation or double newlines (paragraph break).
     sentences = re.split(r"(?<=[.!?\"'])\s+|\n\n+", text)
 
     buffer: List[str] = []
@@ -67,8 +61,6 @@ def _split_into_chunks(text: str, max_chars: int = config.TTS_CHUNK_SIZE) -> Gen
         if not sentence:
             continue
 
-        # If a single sentence is too long, break it at the max without worrying
-        # about sentence integrity (rare, but possible with very long dialogue).
         while len(sentence) > max_chars:
             yield sentence[:max_chars]
             sentence = sentence[max_chars:]
@@ -84,6 +76,158 @@ def _split_into_chunks(text: str, max_chars: int = config.TTS_CHUNK_SIZE) -> Gen
 
     if buffer:
         yield " ".join(buffer)
+
+
+# ── Paragraph splitting with pause hints ──────────────────────────────────────
+
+# Matches scene-break lines: * * *, ---, ───, ===, ~~~, etc.
+_SCENE_BREAK_RE = re.compile(r'^[\s*\-─=~]{3,}$')
+
+
+def _iter_paragraphs(content: str):
+    """
+    Yield (text, pause_after_ms) tuples for natural-sounding TTS output.
+
+    - Scene-break lines (``* * *``, ``───``, ``---``) yield ``("", SCENE_BREAK_MS)``
+      — silence only, nothing synthesised.
+    - Every other paragraph yields ``(text, PARAGRAPH_PAUSE_MS)``.
+
+    Synthesising paragraph-by-paragraph (rather than large chunks) lets the
+    TTS engine produce better sentence-level prosody, and the inserted silences
+    give the listener natural breathing room.
+    """
+    for block in re.split(r'\n\n+', content):
+        block = block.strip()
+        if not block:
+            continue
+        if _SCENE_BREAK_RE.match(block):
+            yield "", config.AUDIO_SCENE_BREAK_MS
+        else:
+            yield block, config.AUDIO_PARAGRAPH_PAUSE_MS
+
+
+# ── Chapter file helpers ───────────────────────────────────────────────────────
+
+def _parse_chapter_file(path: Path) -> Tuple[str, str]:
+    """
+    Parse a per-chapter .txt file and return (title, content).
+
+    Header format:
+        # <title>
+        <blank>
+        Source: <url>
+        <blank>
+        <prose content begins here>
+    """
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    title: str = path.stem
+    content_start = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("# ") and title == path.stem:
+            title = stripped[2:].strip()
+            content_start = i + 1
+        elif stripped.startswith("Source:") or stripped == "":
+            content_start = i + 1
+        else:
+            break
+
+    content = "".join(lines[content_start:]).strip()
+    return title, content
+
+
+def _get_chapter_files(text_path: Path) -> List[Path]:
+    """
+    Given a merged volume .txt path, return sorted per-chapter .txt files from
+    the sibling directory with the same stem. Falls back to [text_path] if no
+    chapter directory exists.
+    """
+    chapter_dir = text_path.parent / text_path.stem
+    if chapter_dir.is_dir():
+        files = sorted(chapter_dir.glob("*.txt"))
+        if files:
+            return files
+    return [text_path]
+
+
+def _clean_volume_title(stem: str) -> str:
+    """
+    Turn a raw volume file stem into a human-readable title.
+
+    '03_Volume 3_ Flowers of Esthelm'  →  'Volume 3: Flowers of Esthelm'
+    """
+    s = re.sub(r"^[\d_]+", "", stem).strip("_ ")
+    s = re.sub(r"_+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"((?:Volume|Book) \d+)\s+", r"\1: ", s, count=1)
+    return s
+
+
+# ── M4B assembly ───────────────────────────────────────────────────────────────
+
+def _assemble_m4b(
+    chapter_mp3s: List[Path],
+    chapter_titles: List[str],
+    volume_title: str,
+    out_path: Path,
+    tmp: Path,
+) -> None:
+    """
+    Assemble per-chapter MP3s into a single M4B with embedded chapter markers.
+    """
+    # Measure chapter durations in milliseconds
+    durations_ms: List[int] = []
+    for mp3 in chapter_mp3s:
+        durations_ms.append(len(AudioSegment.from_mp3(str(mp3))))
+
+    # Write ffmpeg concat list
+    concat_path = tmp / "concat_list.txt"
+    concat_path.write_text(
+        "".join(f"file '{mp3.as_posix()}'\n" for mp3 in chapter_mp3s),
+        encoding="utf-8",
+    )
+
+    # Write ffmetadata with chapter markers
+    meta_lines = [
+        ";FFMETADATA1\n",
+        f"title={volume_title}\n",
+        f"artist={config.AUDIO_AUTHOR}\n",
+        f"album={volume_title}\n\n",
+    ]
+    cursor_ms = 0
+    for title, dur_ms in zip(chapter_titles, durations_ms):
+        safe_title = title.replace("=", r"\=").replace(";", r"\;")
+        meta_lines += [
+            "[CHAPTER]\n",
+            "TIMEBASE=1/1000\n",
+            f"START={cursor_ms}\n",
+            f"END={cursor_ms + dur_ms}\n",
+            f"title={safe_title}\n\n",
+        ]
+        cursor_ms += dur_ms
+
+    meta_path = tmp / "ffmeta.txt"
+    meta_path.write_text("".join(meta_lines), encoding="utf-8")
+
+    # Run ffmpeg
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", str(concat_path),
+        "-i", str(meta_path),
+        "-map_metadata", "1",
+        "-c:a", "aac",
+        "-b:a", "64k",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed (exit {result.returncode}):\n"
+            + result.stderr.decode(errors="replace")
+        )
 
 
 # ── OpenAI TTS ─────────────────────────────────────────────────────────────────
@@ -107,7 +251,7 @@ def _tts_chunk(client: OpenAI, text: str, retries: int = 4) -> bytes:
                 model=config.TTS_MODEL,
                 voice=config.TTS_VOICE,
                 input=text,
-                response_format=config.AUDIO_FORMAT,
+                response_format="mp3",
             )
             return response.content
         except Exception as exc:
@@ -123,46 +267,58 @@ def _tts_chunk(client: OpenAI, text: str, retries: int = 4) -> bytes:
 
 def generate_audiobook(text_path: Path, audio_dir: Path, client: OpenAI) -> Path:
     """
-    Convert a single volume text file into an MP3 audiobook.
-
-    Returns the path to the generated MP3.
+    Convert a single volume text file into an M4B audiobook using OpenAI TTS.
+    Each per-chapter .txt file becomes one embedded chapter.
     """
     stem = text_path.stem
-    out_path = audio_dir / f"{stem}.mp3"
+    out_path = audio_dir / f"{stem}.m4b"
 
     if out_path.exists() and out_path.stat().st_size > 0:
         log.info("Skipping '%s' — audiobook already exists.", stem)
         return out_path
 
-    text = text_path.read_text(encoding="utf-8").strip()
-    if not text:
-        log.warning("'%s' is empty — nothing to convert.", stem)
-        return out_path
-
-    chunks = list(_split_into_chunks(text))
-    log.info("'%s': %d chunks → %s", stem, len(chunks), out_path.name)
-
-    temp_files: List[Path] = []
+    chapter_files = _get_chapter_files(text_path)
+    volume_title = _clean_volume_title(stem)
+    log.info("'%s': %d chapter(s) → %s", stem, len(chapter_files), out_path.name)
 
     with tempfile.TemporaryDirectory(prefix="booker_tts_") as tmpdir:
         tmp = Path(tmpdir)
+        chapter_mp3s: List[Path] = []
+        chapter_titles: List[str] = []
 
-        for i, chunk in enumerate(tqdm(chunks, desc=stem, unit="chunk")):
-            chunk_path = tmp / f"chunk_{i:06d}.mp3"
-            audio_bytes = _tts_chunk(client, chunk)
-            chunk_path.write_bytes(audio_bytes)
-            temp_files.append(chunk_path)
+        for ch_idx, ch_path in enumerate(chapter_files):
+            title, content = _parse_chapter_file(ch_path)
+            chapter_titles.append(title)
+            chapter_seg = AudioSegment.empty()
 
-            # Brief pause between API calls to stay within rate limits.
-            if i < len(chunks) - 1:
+            if config.AUDIO_CHAPTER_TITLE_CARD:
+                title_bytes = _tts_chunk(client, f"Chapter: {title}")
+                tc_path = tmp / f"ch{ch_idx:04d}_tc.mp3"
+                tc_path.write_bytes(title_bytes)
+                chapter_seg += AudioSegment.from_mp3(str(tc_path))
+                chapter_seg += AudioSegment.silent(duration=config.AUDIO_CHAPTER_SILENCE_MS)
                 time.sleep(0.3)
 
-        log.info("Concatenating %d audio chunks…", len(temp_files))
-        combined = AudioSegment.empty()
-        for chunk_path in temp_files:
-            combined += AudioSegment.from_mp3(chunk_path)
+            if content:
+                paragraphs = list(_iter_paragraphs(content))
+                texts = [t for t, _ in paragraphs if t]
+                for i, (para_text, pause_ms) in enumerate(
+                    tqdm(paragraphs, desc=f"ch{ch_idx+1}", unit="para")
+                ):
+                    if para_text:
+                        audio_bytes = _tts_chunk(client, para_text)
+                        chunk_path = tmp / f"ch{ch_idx:04d}_para_{i:06d}.mp3"
+                        chunk_path.write_bytes(audio_bytes)
+                        chapter_seg += AudioSegment.from_mp3(str(chunk_path))
+                        time.sleep(0.3)
+                    chapter_seg += AudioSegment.silent(duration=pause_ms)
 
-        combined.export(str(out_path), format="mp3", bitrate="128k")
+            ch_mp3 = tmp / f"chapter_{ch_idx:04d}.mp3"
+            chapter_seg.export(str(ch_mp3), format="mp3", bitrate="128k")
+            chapter_mp3s.append(ch_mp3)
+
+        log.info("Assembling M4B with %d chapter(s)…", len(chapter_mp3s))
+        _assemble_m4b(chapter_mp3s, chapter_titles, volume_title, out_path, tmp)
 
     log.info("Audiobook saved → %s (%.1f MB)", out_path.name, out_path.stat().st_size / 1e6)
     return out_path
@@ -176,43 +332,73 @@ def generate_audiobook_local(
     backend,  # LocalTTSBackend
 ) -> Path:
     """
-    Convert a single volume text file into an MP3 audiobook using a local
-    TTS backend (Kokoro or Piper).
-
-    Returns the path to the generated MP3.
+    Convert a single volume text file into an M4B audiobook using a local
+    TTS backend (Kokoro or Piper). Each per-chapter .txt file becomes one
+    embedded chapter. Audio is written chunk-by-chunk to avoid the 4 GB WAV
+    size limit.
     """
-    import tempfile
-
-    from pydub import AudioSegment
-
     from local_tts import write_wav
 
     stem = text_path.stem
-    out_path = audio_dir / f"{stem}.mp3"
+    out_path = audio_dir / f"{stem}.m4b"
 
     if out_path.exists() and out_path.stat().st_size > 0:
         log.info("Skipping '%s' — audiobook already exists.", stem)
         return out_path
 
-    text = text_path.read_text(encoding="utf-8").strip()
-    if not text:
-        log.warning("'%s' is empty — nothing to convert.", stem)
-        return out_path
-
-    chunks = list(_split_into_chunks(text, max_chars=config.LOCAL_TTS_CHUNK_SIZE))
-    log.info("'%s': %d chunks (local TTS) → %s", stem, len(chunks), out_path.name)
+    chapter_files = _get_chapter_files(text_path)
+    volume_title = _clean_volume_title(stem)
+    log.info(
+        "'%s': %d chapter(s) (local TTS) → %s",
+        stem, len(chapter_files), out_path.name,
+    )
 
     with tempfile.TemporaryDirectory(prefix="booker_local_tts_") as tmpdir:
         tmp = Path(tmpdir)
-        wav_path = tmp / "audio.wav"
+        chapter_mp3s: List[Path] = []
+        chapter_titles: List[str] = []
 
         log.info("Synthesising with %s backend…", type(backend).__name__)
-        audio = backend.synthesize(chunks, progress_desc=stem)
-        write_wav(wav_path, audio, backend.sample_rate)
 
-        log.info("Converting WAV → MP3…")
-        segment = AudioSegment.from_wav(str(wav_path))
-        segment.export(str(out_path), format="mp3", bitrate="128k")
+        for ch_idx, ch_path in enumerate(chapter_files):
+            title, content = _parse_chapter_file(ch_path)
+            chapter_titles.append(title)
+            chapter_seg = AudioSegment.empty()
+
+            if config.AUDIO_CHAPTER_TITLE_CARD:
+                for audio_arr in backend.synthesize_iter(
+                    [f"Chapter: {title}"],
+                    progress_desc=f"ch{ch_idx+1} title",
+                ):
+                    tc_wav = tmp / f"ch{ch_idx:04d}_tc.wav"
+                    write_wav(tc_wav, audio_arr, backend.sample_rate)
+                    chapter_seg += AudioSegment.from_wav(str(tc_wav))
+                chapter_seg += AudioSegment.silent(duration=config.AUDIO_CHAPTER_SILENCE_MS)
+
+            if content:
+                paragraphs = list(_iter_paragraphs(content))
+                texts = [t for t, _ in paragraphs if t]
+                pauses = [p for _, p in paragraphs]
+                audio_iter = backend.synthesize_iter(
+                    texts, progress_desc=f"ch{ch_idx+1}/{len(chapter_files)}"
+                )
+                audio_queue = list(audio_iter)
+                audio_idx = 0
+                for para_text, pause_ms in paragraphs:
+                    if para_text:
+                        if audio_idx < len(audio_queue):
+                            wav_path = tmp / f"ch{ch_idx:04d}_para_{audio_idx:06d}.wav"
+                            write_wav(wav_path, audio_queue[audio_idx], backend.sample_rate)
+                            chapter_seg += AudioSegment.from_wav(str(wav_path))
+                            audio_idx += 1
+                    chapter_seg += AudioSegment.silent(duration=pause_ms)
+
+            ch_mp3 = tmp / f"chapter_{ch_idx:04d}.mp3"
+            chapter_seg.export(str(ch_mp3), format="mp3", bitrate="128k")
+            chapter_mp3s.append(ch_mp3)
+
+        log.info("Assembling M4B with %d chapter(s)…", len(chapter_mp3s))
+        _assemble_m4b(chapter_mp3s, chapter_titles, volume_title, out_path, tmp)
 
     log.info(
         "Audiobook saved → %s (%.1f MB)", out_path.name, out_path.stat().st_size / 1e6
@@ -225,53 +411,50 @@ def generate_audiobook_local(
 def generate_all_audiobooks(local_tts: str | None = None) -> None:
     """
     Find every top-level .txt volume file in config.BOOKS_DIR and generate
-    an MP3 audiobook for each one.
-
-    Args:
-        local_tts: None → use OpenAI API.
-                   "kokoro" → use Kokoro local backend.
-                   "piper"  → use Piper local backend.
+    an M4B audiobook for each one.
     """
     books_dir = Path(config.BOOKS_DIR)
     audio_dir = Path(config.AUDIO_DIR)
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     volume_files = sorted(books_dir.glob("*.txt"))
-
     if not volume_files:
-        log.warning(
-            "No .txt volume files found in %s.  Run the scraper first.",
-            books_dir,
-        )
+        log.warning("No .txt volume files found in %s. Run the scraper first.", books_dir)
         return
 
-    log.info("Found %d volume file(s) to convert.", len(volume_files))
+    pending = [
+        p for p in volume_files
+        if not (audio_dir / f"{p.stem}.m4b").exists()
+        or (audio_dir / f"{p.stem}.m4b").stat().st_size == 0
+    ]
+
+    log.info(
+        "Found %d volume file(s) to convert (%d already done).",
+        len(pending), len(volume_files) - len(pending),
+    )
+
+    if not pending:
+        log.info("All audiobooks are already complete.")
+        return
 
     if local_tts:
-        # ── Local path ────────────────────────────────────────────────────────
         from local_tts import get_backend
-
         log.info("Using local TTS backend: %s", local_tts)
         backend = get_backend(local_tts)
         try:
-            for vol_path in volume_files:
+            for vol_path in pending:
                 try:
                     generate_audiobook_local(vol_path, audio_dir, backend)
                 except Exception as exc:
-                    log.error(
-                        "Failed to generate audiobook for '%s': %s", vol_path.stem, exc
-                    )
+                    log.error("Failed to generate audiobook for '%s': %s", vol_path.stem, exc)
         finally:
             backend.close()
     else:
-        # ── OpenAI cloud path ─────────────────────────────────────────────────
         client = _make_client()
-        for vol_path in volume_files:
+        for vol_path in pending:
             try:
                 generate_audiobook(vol_path, audio_dir, client)
             except Exception as exc:
-                log.error(
-                    "Failed to generate audiobook for '%s': %s", vol_path.stem, exc
-                )
+                log.error("Failed to generate audiobook for '%s': %s", vol_path.stem, exc)
 
     log.info("All audiobooks complete.  Files are in: %s", audio_dir)

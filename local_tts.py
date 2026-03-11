@@ -57,6 +57,19 @@ class LocalTTSBackend(ABC):
             progress_desc: Label shown on the tqdm progress bar.
         """
 
+    def synthesize_iter(self, chunks: List[str], progress_desc: str = ""):
+        """
+        Yield one float32 numpy audio array per chunk.  Avoids accumulating
+        all audio in memory, preventing the 4 GB WAV limit on long volumes.
+        """
+        from tqdm import tqdm
+        for chunk in tqdm(chunks, desc=progress_desc or type(self).__name__, unit="chunk"):
+            if not chunk.strip():
+                continue
+            arr = self.synthesize([chunk])
+            if arr.size > 0:
+                yield arr
+
     def close(self) -> None:
         """Release any resources held by the backend (optional)."""
 
@@ -151,6 +164,22 @@ class KokoroBackend(LocalTTSBackend):
             return np.array([], dtype=np.float32)
 
         return np.concatenate(audio_parts).astype(np.float32)
+
+    def synthesize_iter(self, chunks: List[str], progress_desc: str = ""):
+        from tqdm import tqdm
+        for chunk in tqdm(chunks, desc=progress_desc or "Kokoro", unit="chunk"):
+            if not chunk.strip():
+                continue
+            try:
+                parts = []
+                for _, _, audio in self._pipeline(chunk, voice=self._voice, speed=self._speed):
+                    if audio is not None and len(audio) > 0:
+                        parts.append(audio if isinstance(audio, np.ndarray) else np.array(audio))
+                if parts:
+                    yield np.concatenate(parts).astype(np.float32)
+            except Exception as exc:
+                log.error("Kokoro synthesis error: %s", exc)
+                raise
 
 
 # ── Piper backend ──────────────────────────────────────────────────────────────

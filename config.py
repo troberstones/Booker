@@ -53,8 +53,23 @@ TTS_VOICE = "nova"
 # OpenAI TTS max chars per request (~4096 tokens ≈ ~16 000 chars is safe).
 TTS_CHUNK_SIZE = 4000
 
-# Output audio format
+# Output audio format (used for OpenAI intermediate chunks; final output is M4B)
 AUDIO_FORMAT = "mp3"
+
+# Author name embedded in M4B metadata.
+AUDIO_AUTHOR = "pirateaba"
+
+# Whether to synthesise a spoken "Chapter: {title}" card at the start of each chapter.
+AUDIO_CHAPTER_TITLE_CARD = True
+
+# Milliseconds of silence inserted after the title card.
+AUDIO_CHAPTER_SILENCE_MS = 800
+
+# Milliseconds of silence inserted after each paragraph (natural breath pause).
+AUDIO_PARAGRAPH_PAUSE_MS = 400
+
+# Milliseconds of silence inserted at scene breaks (* * *, ---, ───).
+AUDIO_SCENE_BREAK_MS = 1500
 
 # ── Local TTS (Apple Silicon / CPU) ──────────────────────────────────────────
 # Used when running with --local-tts kokoro|piper instead of the OpenAI API.

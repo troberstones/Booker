@@ -68,7 +68,7 @@ _BROWSER_PROFILES: list[dict[str, str]] = [
                   "image/avif,image/webp,image/apng,*/*;q=0.8,"
                   "application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
         "Sec-CH-UA-Mobile": "?0",
         "Sec-CH-UA-Platform": '"macOS"',
@@ -90,7 +90,7 @@ _BROWSER_PROFILES: list[dict[str, str]] = [
                   "image/avif,image/webp,image/apng,*/*;q=0.8,"
                   "application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
         "Sec-CH-UA-Mobile": "?0",
         "Sec-CH-UA-Platform": '"Windows"',
@@ -110,7 +110,7 @@ _BROWSER_PROFILES: list[dict[str, str]] = [
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
                   "image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "same-origin",
@@ -128,7 +128,7 @@ _BROWSER_PROFILES: list[dict[str, str]] = [
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
                   "image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "same-origin",
@@ -147,7 +147,7 @@ _BROWSER_PROFILES: list[dict[str, str]] = [
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
     },
 ]
@@ -246,52 +246,83 @@ def _human_sleep() -> None:
 
 def fetch_toc(session: requests.Session) -> List[Volume]:
     """
-    Parse the Wandering Inn Table of Contents page.
+    Parse the Wandering Inn Table of Contents page and group chapters by web
+    serial volume number.
 
-    The page uses a WordPress structure where volumes appear as <h2> or <strong>
-    headings and chapters are <a> links inside list items or paragraphs beneath
-    them.  We walk the DOM sequentially, creating a new Volume each time we hit
-    a heading and appending Chapter objects for every hyperlink we encounter
-    before the next heading.
+    The page splits the web serial into published-book wrappers which don't
+    align with volume numbers (e.g. web-serial chapters 3.26–3.42 sit inside
+    the Book 4 wrapper).  We collect every chapter in page order, detect the
+    leading volume number from the chapter title (e.g. "3.26 G" → volume 3),
+    and group chapters accordingly.  Interludes and unnumbered chapters are
+    attached to the most recently seen numbered volume.
+
+    Volume titles come from the first published-book wrapper that contains
+    chapters belonging to that volume number.
     """
+    import re as _re
+
     log.info("Fetching table of contents from %s", config.TOC_URL)
     resp = _get(session, config.TOC_URL, referer="https://wanderinginn.com/")
     soup = BeautifulSoup(resp.text, "lxml")
 
-    # The ToC content lives inside the main article / entry-content div.
-    content = (
-        soup.find("div", class_="entry-content")
-        or soup.find("article")
-        or soup.find("main")
-        or soup.body
-    )
+    # ── Pass 1: collect every chapter in page order, tagged with the
+    #            published-book title from its wrapper. ──────────────────────
+    @dataclass
+    class _RawChapter:
+        title: str
+        url: str
+        wrapper_title: str
 
-    volumes: List[Volume] = []
-    current_volume: Volume | None = None
+    raw: List[_RawChapter] = []
 
-    # Walk every element that could be a heading or a chapter link.
-    for element in content.descendants:
-        tag = getattr(element, "name", None)
+    for book_div in soup.find_all("div", class_="book-wrapper"):
+        # Raw subtitle from the published-book wrapper (used to name the volume
+        # the first time we encounter chapters belonging to that prefix number).
+        raw_subtitle = book_div.get("data-book-title", "").strip()
+        if not raw_subtitle:
+            meta = book_div.find("div", class_="book-meta")
+            if meta:
+                raw_subtitle = meta.get_text(strip=True)
 
-        # Volume headings — h2, h3, or <strong> that looks like a book title.
-        if tag in ("h2", "h3"):
-            title = element.get_text(strip=True)
-            if title:
-                current_volume = Volume(title=title)
-                volumes.append(current_volume)
-                log.info("Found volume: %s", title)
-            continue
-
-        # Chapter links
-        if tag == "a":
-            href = element.get("href", "")
-            text = element.get_text(strip=True)
+        for entry in book_div.find_all("div", class_="chapter-entry"):
+            web_cell = entry.find("div", class_="body-web")
+            if not web_cell:
+                continue
+            link = web_cell.find("a", href=True)
+            if not link:
+                continue
+            href = link.get("href", "")
+            text = link.get_text(strip=True)
             if href.startswith("http") and "wanderinginn.com" in href and text:
-                if current_volume is None:
-                    current_volume = Volume(title="Uncategorised")
-                    volumes.append(current_volume)
-                current_volume.chapters.append(Chapter(title=text, url=href))
+                raw.append(_RawChapter(title=text, url=href, wrapper_title=raw_subtitle))
 
+    # ── Pass 2: group by leading volume number. ────────────────────────────
+    # vol_map: volume_number → Volume
+    vol_map: dict[int, Volume] = {}
+    vol_order: List[int] = []
+    current_vol_num: Optional[int] = None
+
+    for rc in raw:
+        m = _re.match(r'^(\d+)\.', rc.title)
+        if m:
+            vol_num = int(m.group(1))
+            if vol_num not in vol_map:
+                # Build title from the actual chapter prefix number so
+                # "Volume 3" always means the 3.xx chapter group, regardless
+                # of which published-book wrapper first contained them.
+                subtitle = rc.wrapper_title  # raw book subtitle, no prefix
+                title = f"Volume {vol_num}: {subtitle}" if subtitle else f"Volume {vol_num}"
+                vol_map[vol_num] = Volume(title=title)
+                vol_order.append(vol_num)
+                log.info("Found volume: %s", title)
+            current_vol_num = vol_num
+        # Interludes / unnumbered chapters go into the current volume.
+        if current_vol_num is not None:
+            vol_map[current_vol_num].chapters.append(
+                Chapter(title=rc.title, url=rc.url)
+            )
+
+    volumes = [vol_map[k] for k in vol_order]
     log.info(
         "Table of contents: %d volumes, %d total chapters",
         len(volumes),
