@@ -122,6 +122,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--audio-bitrate",
+        metavar="BITRATE",
+        default=None,
+        help=(
+            "AAC bitrate for the M4B output, e.g. 32k, 24k, 64k. "
+            "Defaults to config.AUDIO_BITRATE (32k). "
+            "32k is indistinguishable from 64k for speech and halves the file size."
+        ),
+    )
+    parser.add_argument(
         "--multi-voice",
         action="store_true",
         help=(
@@ -165,6 +175,10 @@ def main() -> None:
     volumes_preset = args.volumes
     human_mode = args.human_mode
     run_all = not (args.scrape_only or args.filter_only or args.audio_only)
+
+    if args.audio_bitrate:
+        import config as _config
+        _config.AUDIO_BITRATE = args.audio_bitrate
 
     if args.multi_voice:
         if not local_tts:

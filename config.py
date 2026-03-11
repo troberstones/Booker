@@ -56,6 +56,11 @@ TTS_CHUNK_SIZE = 4000
 # Output audio format (used for OpenAI intermediate chunks; final output is M4B)
 AUDIO_FORMAT = "mp3"
 
+# AAC bitrate for the final M4B file.  Speech is indistinguishable at 32k;
+# lower values save space at negligible quality cost for narration.
+# Common choices:  64k (high), 32k (standard, ~half the size), 24k (compact).
+AUDIO_BITRATE = "32k"
+
 # Author name embedded in M4B metadata.
 AUDIO_AUTHOR = "pirateaba"
 

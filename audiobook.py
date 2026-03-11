@@ -218,7 +218,7 @@ def _assemble_m4b(
         "-i", str(meta_path),
         "-map_metadata", "1",
         "-c:a", "aac",
-        "-b:a", "64k",
+        "-b:a", config.AUDIO_BITRATE,
         "-movflags", "+faststart",
         str(out_path),
     ]
